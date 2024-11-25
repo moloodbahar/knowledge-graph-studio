@@ -34,9 +34,7 @@ class MongoDBConnection:
         self.client = get_client()  # type: ignore[assignment]
         if self.client is None:
             raise ConnectionError("Failed to connect to MongoDB client.")
-        self.db = self.client.get_database(
-            "main"
-        )  # Ensure 'main' database is selected
+        self.db = self.client.get_database(self.settings.mongodb.database_name)
         return self.db
 
     def __exit__(
@@ -68,42 +66,60 @@ async def setup_collections_and_indexes(
         if collection_name not in existing_collections:
             await db.create_collection(collection_name)
             print(f"Created collection: {collection_name}")
-        else:
-            print(f"Collection {collection_name} already exists.")
 
         # Create regular indexes
         for index in details.get("regular_indexes", []):
             try:
                 key = [(field, direction) for field, direction in index["key"]]
-                await db[collection_name].create_index(key, name=index["name"])
-                print(
-                    f"Created regular index '{index['name']}' on collection '{collection_name}'."
+                index_options = {k: v for k, v in index.items() if k not in ["key", "name"]}
+                await db[collection_name].create_index(
+                    key, 
+                    name=index["name"],
+                    **index_options
                 )
+                print(f"Created regular index '{index['name']}' on collection '{collection_name}'.")
             except Exception as e:
-                print(
-                    f"Failed to create regular index '{index['name']}' on collection '{collection_name}': {e}"
-                )
+                print(f"Failed to create regular index '{index['name']}' on collection '{collection_name}': {e}")
 
-        # Create search indexes
+        # Create search indexes with proper format
         for search_index in details.get("search_indexes", []):
             try:
-                # Build the search index definition
-                definition = {
-                    "mappings": {
-                        "dynamic": False,
-                        "fields": search_index["fields"],
+                if not search_index.get("fields"):
+                    continue  # Skip empty field definitions
+                    
+                if search_index["type"] == "vectorSearch":
+                    definition = {
+                        "mappings": {
+                            "dynamic": False,
+                            "fields": {
+                                field["path"]: {
+                                    "type": field["type"],
+                                    **({"dimensions": field["numDimensions"]} if field["type"] == "vector" else {}),
+                                    **({"similarity": field["similarity"]} if field["type"] == "vector" else {})
+                                }
+                                for field in search_index["fields"]
+                            }
+                        }
                     }
-                }
-                await db[collection_name].create_search_index(
-                    {"name": search_index["name"], "definition": definition}
-                )
-                print(
-                    f"Created search index '{search_index['name']}' on collection '{collection_name}'."
-                )
+                else:  # regular search index
+                    definition = {
+                        "mappings": {
+                            "dynamic": False,
+                            "fields": {
+                                field["path"]: {"type": field["type"]}
+                                for field in search_index["fields"]
+                            }
+                        }
+                    }
+
+                await db.command({
+                    "createSearchIndex": collection_name,
+                    "name": search_index["name"],
+                    "definition": definition
+                })
+                print(f"Created search index '{search_index['name']}' on collection '{collection_name}'.")
             except Exception as e:
-                print(
-                    f"Failed to create search index '{search_index['name']}' on collection '{collection_name}': {e}"
-                )
+                print(f"Failed to create search index '{search_index['name']}' on collection '{collection_name}': {str(e)}")
 
 
 async def create_user_in_db(
