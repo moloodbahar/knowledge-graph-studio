@@ -5,8 +5,6 @@ import logging
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Self
 
-import re
-from typing import List, Dict
 from whyhow_api.models.common import (
     SchemaEntity,
     SchemaRelation,
@@ -24,43 +22,6 @@ from whyhow_api.schemas.workspaces import WorkspaceDetails
 
 logger = logging.getLogger(__name__)
 
-def normalize_name(name: str) -> str:
-    """Normalize the node name by removing special characters, possessive forms, and normalizing case."""
-    # Remove possessive form
-    name = re.sub(r"'s\b", "", name)
-    # Replace separators with space
-    name = re.sub(r"[_\-\.\s]+", " ", name)
-    # Normalize to lowercase and trim
-    return name.lower().strip()
-
-def deduplicate_nodes(
-    existing_nodes: List[SchemaEntity],
-    new_nodes: List[SchemaEntity],
-    relationships: List[Dict]
-) -> List[SchemaEntity]:
-    """Deduplicate new nodes against existing nodes."""
-    normalized_to_original = {
-        normalize_name(node.name): node.name for node in existing_nodes
-    }
-    merged_nodes = existing_nodes[:]
-
-    for new_node in new_nodes:
-        normalized_name = normalize_name(new_node.name)
-
-        if normalized_name in normalized_to_original:
-            # A match is found, merge relationships
-            existing_name = normalized_to_original[normalized_name]
-            for relationship in relationships:
-                if relationship["head"] == new_node.name:
-                    relationship["head"] = existing_name
-                if relationship["tail"] == new_node.name:
-                    relationship["tail"] = existing_name
-        else:
-            # Add as a new node and update mapping
-            normalized_to_original[normalized_name] = new_node.name
-            merged_nodes.append(new_node)
-
-    return merged_nodes
 
 class SchemaDocumentModel(BaseDocument):
     """Schema document model."""
@@ -100,17 +61,6 @@ class SchemaCreate(BaseModel):
 
         return self
 
-    @model_validator(mode="after")
-    def deduplicate_and_add_nodes(self) -> Self:
-        """Deduplicate nodes before adding them."""
-        self.entities = deduplicate_nodes(
-            existing_nodes=self.entities,
-            new_nodes=self.entities,
-            relationships=self.relations
-        )
-        return self 
-    
-    
     @model_validator(mode="after")
     def update_patterns(self) -> Self:
         """Update the patterns.

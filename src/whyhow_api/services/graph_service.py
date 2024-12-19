@@ -8,7 +8,7 @@ import typing
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from json.decoder import JSONDecodeError
-from typing import Any, DefaultDict, Dict, List, Mapping, Sequence, Set, Tuple
+from typing import Any, DefaultDict, Dict, List, Mapping, Sequence, Set, Tuple, Optional
 
 import openai
 import tiktoken
@@ -65,12 +65,7 @@ from whyhow_api.services.crud.triple import (
     update_triple_embeddings,
 )
 from whyhow_api.utilities.builders import OpenAIBuilder, SpacyEntityExtractor
-from whyhow_api.utilities.common import (
-    check_existing,
-    clean_text,
-    dict_to_tuple,
-    tuple_to_dict,
-)
+from whyhow_api.utilities.node_normalization import normalize_node_name, find_similar_node
 from whyhow_api.utilities.config import (
     create_schema_guided_graph_prompt,
     openai_completions_configs,
@@ -1928,7 +1923,7 @@ class MixedQueryProcessor(QueryProcessor):
             return_answer = request.return_answer
             include_chunks = request.include_chunks
             response = (
-                "Unfortunately, we couldn’t find an answer this time. Feel free to ask another question or provide additional context!"
+                "Unfortunately, we couldn't find an answer this time. Feel free to ask another question or provide additional context!"
                 if return_answer
                 else None
             )
@@ -2886,3 +2881,179 @@ async def create_or_update_graph_from_triples(
     )
 
     return task
+
+
+async def create_nodes_for_batch(
+    db: AsyncIOMotorDatabase,
+    user_id: ObjectId,
+    graph_id: ObjectId,
+    nodes_data: list[dict],
+    session: Optional[AsyncIOMotorClientSession] = None,
+) -> dict[str, ObjectId]:
+    """Create nodes for a batch with name normalization.
+    
+    Parameters
+    ----------
+    db : AsyncIOMotorDatabase
+        Database connection
+    user_id : ObjectId
+        ID of the user creating nodes
+    graph_id : ObjectId
+        ID of the graph to add nodes to
+    nodes_data : list[dict]
+        List of node data dictionaries containing name, type and optional properties
+    session : Optional[AsyncIOMotorClientSession]
+        Optional database session for transactions
+        
+    Returns
+    -------
+    dict[str, ObjectId]
+        Mapping of original node names to their ObjectIds
+    """
+    # Get existing nodes for this graph
+    existing_nodes = await db.node.find(
+        {"graph": graph_id, "created_by": user_id},
+        {"name": 1, "type": 1}
+    ).to_list(None)
+    
+    node_mapping = {}
+    nodes_to_create = []
+    
+    for node_data in nodes_data:
+        original_name = node_data['name']
+        node_type = node_data['type']
+        
+        # Skip if we already processed this node
+        if original_name in node_mapping:
+            continue
+            
+        # Normalize the node name
+        normalized_name = normalize_node_name(original_name)
+        
+        # Check for similar existing nodes
+        similar_node = find_similar_node(normalized_name, node_type, existing_nodes)
+        
+        if similar_node:
+            # Use existing similar node
+            node_mapping[original_name] = similar_node['_id']
+        else:
+            # Create new node
+            new_node = {
+                '_id': ObjectId(),
+                'name': normalized_name,
+                'type': node_type,
+                'created_by': user_id,
+                'graph': graph_id,
+                'properties': node_data.get('properties', {}),
+                'chunks': node_data.get('chunks', [])
+            }
+            nodes_to_create.append(new_node)
+            node_mapping[original_name] = new_node['_id']
+            
+            # Add to existing nodes to check for future similarities
+            existing_nodes.append({
+                '_id': new_node['_id'],
+                'name': normalized_name,
+                'type': node_type
+            })
+    
+    # Bulk insert new nodes if any
+    if nodes_to_create:
+        await db.node.insert_many(nodes_to_create, session=session)
+    
+    return node_mapping
+
+def clean_text(text: str) -> str:
+    """Clean text by removing extra whitespace and normalizing.
+    
+    Parameters
+    ----------
+    text : str
+        The text to clean
+        
+    Returns
+    -------
+    str
+        The cleaned text with normalized whitespace
+    """
+    return " ".join(text.split()).strip()
+
+def dict_to_tuple(d: Dict[str, Any]) -> Tuple[Any, ...]:
+    """Convert a dictionary to a tuple for hashable comparison.
+    
+    Parameters
+    ----------
+    d : Dict[str, Any]
+        Dictionary to convert
+        
+    Returns
+    -------
+    Tuple[Any, ...]
+        Tuple representation of the dictionary
+    """
+    if isinstance(d, dict):
+        return tuple(sorted((k, dict_to_tuple(v)) for k, v in d.items()))
+    elif isinstance(d, list):
+        return tuple(dict_to_tuple(x) for x in d)
+    else:
+        return d
+
+def tuple_to_dict(t: Tuple[Any, ...]) -> Dict[str, Any]:
+    """Convert a tuple back to a dictionary.
+    
+    Parameters
+    ----------
+    t : Tuple[Any, ...]
+        Tuple to convert back to dictionary
+        
+    Returns
+    -------
+    Dict[str, Any]
+        Dictionary representation of the tuple
+    """
+    if isinstance(t, tuple) and len(t) > 0 and isinstance(t[0], tuple):
+        return {k: tuple_to_dict(v) for k, v in t}
+    return t
+
+async def check_existing(
+    db: AsyncIOMotorDatabase,
+    collection_name: str,
+    items: List[Any],
+    filter_dict: Dict[str, Any]
+) -> List[Any]:
+    """Check if items already exist in a collection and return only valid ones.
+    
+    Parameters
+    ----------
+    db : AsyncIOMotorDatabase
+        Database connection
+    collection_name : str
+        Name of the collection to check
+    items : List[Any]
+        List of items to validate
+    filter_dict : Dict[str, Any]
+        Additional filters to apply when checking existence
+        
+    Returns
+    -------
+    List[Any]
+        List of validated items that exist in the collection
+    """
+    if not items:
+        return []
+        
+    # Create query filter combining item IDs and additional filters
+    query = {
+        "_id": {"$in": [ObjectId(item) if isinstance(item, str) else item for item in items]},
+        **filter_dict
+    }
+    
+    # Find matching documents
+    cursor = db[collection_name].find(query, {"_id": 1})
+    existing = await cursor.to_list(None)
+    
+    # Extract IDs of existing items
+    existing_ids = [str(doc["_id"]) for doc in existing]
+    
+    # Return only items that exist in the collection
+    return [item for item in items if str(item) in existing_ids]

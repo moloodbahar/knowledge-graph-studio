@@ -730,3 +730,24 @@ async def valid_create_graph(
             detail="Graph already exists or is being created.",
         )
     return True
+
+
+async def validate_document(
+    document_id: str,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> Dict[str, Any]:
+    """Validate document exists and return it."""
+    try:
+        document = await db.document.find_one({"_id": ObjectId(document_id)})
+        if not document:
+            raise HTTPException(
+                status_code=404,
+                detail="Document not found"
+            )
+        return document
+    except Exception as e:
+        logger.error(f"Failed to validate document: {str(e)}")
+        raise HTTPException(
+            status_code=404,
+            detail="Document not found"
+        )

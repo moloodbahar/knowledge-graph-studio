@@ -20,6 +20,50 @@ from whyhow_api.schemas.triples import TripleWithId
 logger = logging.getLogger(__name__)
 
 
+async def check_existing(
+    db: AsyncIOMotorDatabase,
+    collection_name: str,
+    items: List[Any],
+    filter_dict: Dict[str, Any]
+) -> List[Any]:
+    """Check if items already exist in a collection and return only valid ones.
+    
+    Parameters
+    ----------
+    db : AsyncIOMotorDatabase
+        Database connection
+    collection_name : str
+        Name of the collection to check
+    items : List[Any]
+        List of items to validate
+    filter_dict : Dict[str, Any]
+        Additional filters to apply when checking existence
+        
+    Returns
+    -------
+    List[Any]
+        List of validated items that exist in the collection
+    """
+    if not items:
+        return []
+        
+    # Create query filter combining item IDs and additional filters
+    query = {
+        "_id": {"$in": [ObjectId(item) if isinstance(item, str) else item for item in items]},
+        **filter_dict
+    }
+    
+    # Find matching documents
+    cursor = db[collection_name].find(query, {"_id": 1})
+    existing = await cursor.to_list(None)
+    
+    # Extract IDs of existing items
+    existing_ids = [str(doc["_id"]) for doc in existing]
+    
+    # Return only items that exist in the collection
+    return [item for item in items if str(item) in existing_ids]
+
+
 async def delete_graphs(
     db: AsyncIOMotorDatabase,
     user_id: ObjectId,

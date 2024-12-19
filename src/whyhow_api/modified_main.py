@@ -12,8 +12,10 @@ from asgi_correlation_id.context import correlation_id
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, JSONResponse
+from fastapi.responses import Response, HTMLResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from dotenv import load_dotenv
+import os
 
 from whyhow_api import __version__
 from whyhow_api.config import Settings
@@ -21,19 +23,16 @@ from whyhow_api.custom_logging import configure_logging
 from whyhow_api.database import close_mongo_connection, connect_to_mongo
 from whyhow_api.dependencies import get_db, get_settings
 from whyhow_api.middleware import RateLimiter
-from fastapi.responses import FileResponse
-import os
 from whyhow_api.routers import (
     chunks, documents, graphs, nodes, queries, rules,
     schemas, tasks, triples, users, workspaces,
 )
 
+load_dotenv()
 logger = logging.getLogger("whyhow_api.main")
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Read environment (settings of the application)."""
     settings = app.dependency_overrides.get(get_settings, get_settings)()
     configure_logging(project_log_level=settings.dev.log_level)
     basicConfig(handlers=[logfire.LogfireLoggingHandler()])
@@ -46,14 +45,58 @@ async def lifespan(app: FastAPI):
         close_mongo_connection()
         logger.info("Database connection closed")
 
+def create_app() -> FastAPI:
+    app = FastAPI(
+        title="WhyHow API",
+        description="API for WhyHow Knowledge Graph",
+        version="1.0.0",
+        lifespan=lifespan
+    )
 
-app = FastAPI(
-    title="WhyHow API",
-    summary="RAG with knowledge graphs",
-    version=__version__,
-    lifespan=lifespan,
-    openapi_url=get_settings().dev.openapi_url,
-)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    app.add_middleware(RateLimiter)
+
+    @app.get("/docs", include_in_schema=False)
+    async def custom_swagger_ui_html():
+        logger.info("Docs endpoint accessed")
+        return HTMLResponse("""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <link type="text/css" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css">
+                <title>WhyHow API - Swagger UI</title>
+            </head>
+            <body>
+                <div id="swagger-ui"></div>
+                <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+                <script>
+                    window.onload = function() {
+                        window.ui = SwaggerUIBundle({
+                            url: '/openapi.json',
+                            dom_id: '#swagger-ui',
+                            presets: [
+                                SwaggerUIBundle.presets.apis,
+                                SwaggerUIBundle.SwaggerUIStandalonePreset
+                            ],
+                            layout: "BaseLayout",
+                            deepLinking: true
+                        });
+                    }
+                </script>
+            </body>
+            </html>
+        """)
+
+    return app
+
+app = create_app()
 logfire.instrument_fastapi(app)
 
 
@@ -66,6 +109,11 @@ async def unhandled_exception_handler(
     The reason for this is to ensure that all exceptions
     have the correlation ID in the response headers.
     """
+    # For debugging and in tests
+    # import traceback
+
+    # traceback.print_exception(exc)
+
     return await http_exception_handler(
         request,
         HTTPException(
@@ -76,19 +124,7 @@ async def unhandled_exception_handler(
     )
 
 
-app.add_middleware(RateLimiter)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["X-Request-ID"],
-)
-
 app.add_middleware(CorrelationIdMiddleware)
-
 app.include_router(workspaces.router)
 app.include_router(schemas.router)
 app.include_router(graphs.router)
@@ -128,13 +164,6 @@ def settings(settings: Annotated[Settings, Depends(get_settings)]) -> Any:
     """
     return settings
 
-@app.get('/favicon.ico', include_in_schema=False)
-async def favicon():
-    return FileResponse(
-        os.path.join('static', 'favicon.ico'),  # Adjust path as needed
-        media_type='image/x-icon'
-    )
-
 
 def locate() -> None:
     """Find absolute path to this file and format for uvicorn."""
@@ -147,35 +176,10 @@ def locate() -> None:
     res = f"{dotted_path}:app"
     print(res)
 
-@app.on_event("startup")
-async def startup_event():
-    print("\nAvailable routes:")
-    for route in app.routes:
-        if hasattr(route, "methods"):
-            print(f"{route.methods} {route.path}")
-    print("\n")
-
 @app.middleware("http")
-async def log_requests(request: Request, call_next):
-    logger.debug(f"Request: {request.method} {request.url}")
-    logger.debug(f"Headers: {request.headers}")
-    try:
-        response = await call_next(request)
-        logger.debug(f"Response status: {response.status_code}")
-        return response
-    except Exception as e:
-        logger.exception("Error processing request")
-        return JSONResponse(
-            status_code=500,
-            content={"detail": str(e)}
-        )
-
-@app.get("/workspaces")
-async def get_workspaces():
-    try:
-        # Your existing code here
-        logger.debug("Processing get_workspaces request")
-        # ... rest of the code
-    except Exception as e:
-        logger.exception("Error in get_workspaces")
-        raise
+async def debug_middleware(request: Request, call_next):
+    """Debug middleware to log all requests."""
+    logger.info(f"Request path: {request.url.path}")
+    response = await call_next(request)
+    logger.info(f"Response status: {response.status_code}")
+    return response

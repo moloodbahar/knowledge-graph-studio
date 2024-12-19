@@ -66,6 +66,8 @@ async def setup_collections_and_indexes(
         if collection_name not in existing_collections:
             await db.create_collection(collection_name)
             print(f"Created collection: {collection_name}")
+        else:
+            print(f"Collection {collection_name} already exists.")
 
         # Create regular indexes
         for index in details.get("regular_indexes", []):
